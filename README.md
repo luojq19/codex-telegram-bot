@@ -19,6 +19,8 @@ The relay runs on your server, polls Telegram Bot API, starts Codex subprocesses
 - Allows only explicitly configured Telegram `chat_id`s.
 - Starts new Codex sessions with `/codex <task>`.
 - Resumes the Telegram-bound Codex session on later `/codex <task>` calls.
+- Attaches Telegram photos to Codex by passing them as `--image` arguments.
+- Supports Telegram photo albums by collecting the album briefly and sending all images together.
 - Lists known Codex sessions with `/sessions`.
 - Manually binds to a session with `/resume <session_id>`.
 - Shows recent conversation history with `/history`.
@@ -241,6 +243,26 @@ Run a new task:
 /codex summarize this project in 5 bullet points
 ```
 
+Run Codex with one image:
+
+1. Send a photo to the bot.
+2. Put this in the photo caption:
+
+```text
+/codex describe this image
+```
+
+Run Codex with multiple images:
+
+1. Select multiple photos in Telegram and send them as one album.
+2. Put this in the album caption:
+
+```text
+/codex compare these images
+```
+
+The relay downloads the largest Telegram photo size for each image, passes each local file to Codex with `--image`, and deletes the temporary files after Codex finishes.
+
 Continue the same Telegram-bound Codex session:
 
 ```text
@@ -300,6 +322,8 @@ Shows the current Telegram `chat_id`.
 ```
 
 Runs Codex. If this Telegram chat has a saved Codex session, the relay calls `codex exec resume`; otherwise it calls `codex exec` and saves the new session id.
+
+You can also send Telegram photos with a `/codex ...` caption. The relay passes them to Codex using repeated `--image` arguments.
 
 ```text
 /new [task]
@@ -402,6 +426,12 @@ If commands run but produce no answer:
 - Check the tmux output.
 - Increase `CODEX_RELAY_TIMEOUT_SEC`.
 - Run the equivalent `codex exec` command manually on the server.
+
+If image messages do not work:
+
+- Make sure the photo caption starts with `/codex`.
+- For albums, put the caption on the album, not as a separate text message.
+- Check that your Codex CLI supports `--image`; run `codex exec --help`.
 
 ## Development
 

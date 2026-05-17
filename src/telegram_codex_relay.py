@@ -24,6 +24,8 @@ state_lock = threading.Lock()
 current_process: subprocess.Popen | None = None
 current_chat_id: int | None = None
 current_started_at: float | None = None
+media_group_lock = threading.Lock()
+media_groups: dict[str, dict] = {}
 
 
 def main() -> int:
@@ -106,8 +108,9 @@ def handle_update(api: "TelegramAPI", update: dict, allowed_ids: set[int]) -> No
     message = update.get("message") or update.get("edited_message") or {}
     chat = message.get("chat") or {}
     chat_id = chat.get("id")
-    text = (message.get("text") or "").strip()
-    if chat_id is None or not text:
+    text = (message.get("text") or message.get("caption") or "").strip()
+    photos = message.get("photo") or []
+    if chat_id is None or (not text and not photos):
         return
 
     if text.startswith("/start") or text.startswith("/help"):
@@ -168,18 +171,17 @@ def handle_update(api: "TelegramAPI", update: dict, allowed_ids: set[int]) -> No
         clear_chat_session(int(chat_id))
         prompt = text[len("/new") :].strip()
         if prompt:
-            thread = threading.Thread(
-                target=run_codex_and_reply,
-                args=(api, int(chat_id), prompt, True),
-                daemon=True,
-            )
-            thread.start()
+            start_codex_thread(api, int(chat_id), prompt, force_new=True)
         else:
             api.send_message(chat_id, "Cleared the Telegram-bound Codex session. Next /codex starts fresh.")
         return
 
     if text.startswith("/cancel"):
         api.send_message(chat_id, cancel_current())
+        return
+
+    if photos:
+        handle_photo_message(api, int(chat_id), text, photos, message)
         return
 
     if not text.startswith("/codex"):
@@ -191,12 +193,104 @@ def handle_update(api: "TelegramAPI", update: dict, allowed_ids: set[int]) -> No
         api.send_message(chat_id, "Usage: /codex <task>")
         return
 
+    start_codex_thread(api, int(chat_id), prompt)
+
+
+def handle_photo_message(
+    api: "TelegramAPI",
+    chat_id: int,
+    text: str,
+    photos: list,
+    message: dict,
+) -> None:
+    media_group_id = message.get("media_group_id")
+    if media_group_id:
+        collect_media_group(api, chat_id, str(media_group_id), text, photos)
+        return
+
+    prompt = parse_codex_prompt(text)
+    if prompt is None:
+        api.send_message(chat_id, "Send photos with a caption like: /codex describe this image")
+        return
+
+    start_codex_thread(api, chat_id, prompt, [largest_photo_file_id(photos)])
+
+
+def collect_media_group(
+    api: "TelegramAPI",
+    chat_id: int,
+    media_group_id: str,
+    text: str,
+    photos: list,
+) -> None:
+    with media_group_lock:
+        group = media_groups.setdefault(
+            media_group_id,
+            {
+                "api": api,
+                "chat_id": chat_id,
+                "prompt_text": "",
+                "file_ids": [],
+                "timer": None,
+            },
+        )
+        if text and not group["prompt_text"]:
+            group["prompt_text"] = text
+        group["file_ids"].append(largest_photo_file_id(photos))
+        if group["timer"] is not None:
+            group["timer"].cancel()
+        group["timer"] = threading.Timer(1.5, process_media_group, args=(media_group_id,))
+        group["timer"].daemon = True
+        group["timer"].start()
+
+
+def process_media_group(media_group_id: str) -> None:
+    with media_group_lock:
+        group = media_groups.pop(media_group_id, None)
+    if group is None:
+        return
+
+    api = group["api"]
+    chat_id = group["chat_id"]
+    prompt = parse_codex_prompt(group["prompt_text"])
+    if prompt is None:
+        api.send_message(chat_id, "Send photo groups with a caption like: /codex compare these images")
+        return
+
+    start_codex_thread(api, chat_id, prompt, group["file_ids"])
+
+
+def parse_codex_prompt(text: str) -> str | None:
+    if not text.startswith("/codex"):
+        return None
+    prompt = text[len("/codex") :].strip()
+    return prompt or "Analyze the attached image."
+
+
+def largest_photo_file_id(photos: list) -> str:
+    if not photos:
+        raise ValueError("photo message has no photo sizes")
+    largest = max(photos, key=lambda item: int(item.get("file_size") or item.get("width", 0) * item.get("height", 0)))
+    return str(largest["file_id"])
+
+
+def start_codex_thread(
+    api: "TelegramAPI",
+    chat_id: int,
+    prompt: str,
+    photo_file_ids: list[str] | None = None,
+    force_new: bool = False,
+) -> None:
     with state_lock:
         if current_process is not None:
             api.send_message(chat_id, status_text())
             return
 
-    thread = threading.Thread(target=run_codex_and_reply, args=(api, int(chat_id), prompt), daemon=True)
+    thread = threading.Thread(
+        target=run_codex_and_reply,
+        args=(api, chat_id, prompt, force_new, photo_file_ids or []),
+        daemon=True,
+    )
     thread.start()
 
 
@@ -205,6 +299,7 @@ def help_text() -> str:
         "Telegram Codex relay\n\n"
         "/id - show your chat_id for allowlist setup\n"
         "/codex <task> - run Codex, resuming this Telegram chat's session when possible\n"
+        "Send photos with a /codex caption to attach images to the task\n"
         "/new [task] - clear the saved session, optionally starting a fresh Codex task\n"
         "/session - show this Telegram chat's saved Codex session id\n"
         "/sessions [all|N] - list recent Codex sessions for copy/paste resume\n"
@@ -455,7 +550,13 @@ def cancel_current() -> str:
         return f"Could not terminate process: {exc}"
 
 
-def run_codex_and_reply(api: "TelegramAPI", chat_id: int, prompt: str, force_new: bool = False) -> None:
+def run_codex_and_reply(
+    api: "TelegramAPI",
+    chat_id: int,
+    prompt: str,
+    force_new: bool = False,
+    photo_file_ids: list[str] | None = None,
+) -> None:
     global current_chat_id, current_process, current_started_at
 
     codex_bin = os.environ.get("CODEX_BIN", DEFAULT_CODEX_BIN)
@@ -463,9 +564,22 @@ def run_codex_and_reply(api: "TelegramAPI", chat_id: int, prompt: str, force_new
     sandbox = os.environ.get("CODEX_SANDBOX", "workspace-write")
     timeout_sec = int(os.environ.get("CODEX_RELAY_TIMEOUT_SEC", "3600"))
     session_id = "" if force_new else load_chat_session(chat_id)
+    photo_file_ids = photo_file_ids or []
 
     with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt", delete=False) as tmp:
         last_message_path = Path(tmp.name)
+    image_paths: list[Path] = []
+
+    try:
+        if photo_file_ids:
+            image_paths = download_telegram_images(api, photo_file_ids)
+    except Exception as exc:
+        api.send_message(chat_id, f"Could not download Telegram image(s): {exc}")
+        try:
+            last_message_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return
 
     if session_id:
         cmd = [
@@ -476,9 +590,10 @@ def run_codex_and_reply(api: "TelegramAPI", chat_id: int, prompt: str, force_new
             "--json",
             "--output-last-message",
             str(last_message_path),
-            session_id,
-            prompt,
         ]
+        for image_path in image_paths:
+            cmd.extend(["--image", str(image_path)])
+        cmd.extend([session_id, prompt])
     else:
         cmd = [
             codex_bin,
@@ -493,8 +608,10 @@ def run_codex_and_reply(api: "TelegramAPI", chat_id: int, prompt: str, force_new
             "--json",
             "--output-last-message",
             str(last_message_path),
-            prompt,
         ]
+        for image_path in image_paths:
+            cmd.extend(["--image", str(image_path)])
+        cmd.append(prompt)
 
     env = os.environ.copy()
     extra_path = os.environ.get("CODEX_EXTRA_PATH", "").strip()
@@ -546,10 +663,39 @@ def run_codex_and_reply(api: "TelegramAPI", chat_id: int, prompt: str, force_new
             last_message_path.unlink(missing_ok=True)
         except Exception:
             pass
+        for image_path in image_paths:
+            try:
+                image_path.unlink(missing_ok=True)
+            except Exception:
+                pass
         with state_lock:
             current_process = None
             current_chat_id = None
             current_started_at = None
+
+
+def download_telegram_images(api: "TelegramAPI", file_ids: list[str]) -> list[Path]:
+    result: list[Path] = []
+    image_dir = state_dir() / "images"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        for index, file_id in enumerate(file_ids, start=1):
+            file_info = api.get_file(file_id)
+            file_path = file_info.get("file_path")
+            if not file_path:
+                raise RuntimeError(f"Telegram returned no file_path for image {index}")
+            suffix = Path(str(file_path)).suffix or ".jpg"
+            destination = image_dir / f"telegram-image-{int(time.time() * 1000)}-{index}{suffix}"
+            api.download_file(str(file_path), destination)
+            result.append(destination)
+        return result
+    except Exception:
+        for path in result:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
 
 
 def read_last_message(path: Path) -> str:
@@ -582,6 +728,7 @@ def tail_text(text: str, max_chars: int) -> str:
 
 class TelegramAPI:
     def __init__(self, token: str) -> None:
+        self.token = token
         self.base_url = f"https://api.telegram.org/bot{token}"
 
     def get_updates(self, offset: int, timeout: int) -> list[dict]:
@@ -608,6 +755,19 @@ class TelegramAPI:
             if len(chunks) > 1:
                 chunk = f"[{index}/{len(chunks)}]\n{chunk}"
             self.send_message(chat_id, chunk)
+
+    def get_file(self, file_id: str) -> dict:
+        data = self.call("getFile", {"file_id": file_id}, timeout=20)
+        result = data.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Unexpected getFile response: {data}")
+        return result
+
+    def download_file(self, file_path: str, destination: Path) -> None:
+        url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+        request = urllib.request.Request(url)
+        with urllib.request.urlopen(request, timeout=60) as response:
+            destination.write_bytes(response.read())
 
     def call(self, method: str, params: dict[str, str], timeout: int) -> dict:
         body = urllib.parse.urlencode(params).encode()
