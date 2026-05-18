@@ -71,13 +71,50 @@ No Python packages are required.
 ├── LICENSE
 ├── README.md
 ├── scripts
+│   ├── install.sh
 │   ├── start_telegram_codex_relay.sh
 │   └── telegram_codex_relay_status.sh
 └── src
     └── telegram_codex_relay.py
 ```
 
-## Step 1: Create A Telegram Bot
+## Quick Install
+
+Clone the repo and run the installer:
+
+```bash
+git clone git@github.com:luojq19/codex-telegram-bot.git
+cd codex-telegram-bot
+./scripts/install.sh
+```
+
+The installer will:
+
+- Ask for your Telegram bot token.
+- Explain how to create a bot with `@BotFather`.
+- Ask for your Codex command/path, project directory, sandbox, and timeout.
+- Temporarily start the relay in the background so you can send `/id` to the bot.
+- Ask for the returned `chat_id`.
+- Stop the temporary relay automatically.
+- Write a private `.env` file with mode `600`.
+
+After it finishes, start the relay:
+
+```bash
+./scripts/start_telegram_codex_relay.sh
+```
+
+Recommended tmux run:
+
+```bash
+tmux new -s codex-telegram
+cd /path/to/codex-telegram-bot
+./scripts/start_telegram_codex_relay.sh
+```
+
+The rest of this README describes the manual setup flow and all commands.
+
+## Manual Step 1: Create A Telegram Bot
 
 On your phone or desktop Telegram:
 
@@ -113,6 +150,7 @@ session - show bound Codex session id
 sessions - list recent Codex sessions
 resume - bind to a Codex session id
 history - show recent messages in the bound session
+usage - show latest Codex rate-limit usage
 menu - show quick command keyboard
 status - show relay status
 cancel - terminate current Codex subprocess
@@ -121,7 +159,7 @@ help - show help
 
 This BotFather command menu is optional. The relay also provides a reply keyboard through `/menu`.
 
-## Step 2: Clone And Configure
+## Manual Step 2: Clone And Configure
 
 On your server:
 
@@ -161,7 +199,7 @@ or set:
 CODEX_EXTRA_PATH=/home/you/.nvm/versions/node/v24.15.0/bin
 ```
 
-## Step 3: Get Your Telegram `chat_id`
+## Manual Step 3: Get Your Telegram `chat_id`
 
 Start the relay temporarily:
 
@@ -193,7 +231,7 @@ Multiple allowed chats are comma-separated:
 TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321
 ```
 
-## Step 4: Run In tmux
+## Manual Step 4: Run In tmux
 
 Recommended:
 
