@@ -121,6 +121,10 @@ def handle_update(api: "TelegramAPI", update: dict, allowed_ids: set[int]) -> No
         api.send_message(chat_id, "Command menu enabled.", reply_markup=command_keyboard())
         return
 
+    if text.startswith("/usage"):
+        api.send_message(chat_id, usage_text(), reply_markup=command_keyboard())
+        return
+
     if text.startswith("/id"):
         user = message.get("from") or {}
         api.send_message(
@@ -306,6 +310,7 @@ def help_text() -> str:
         "/history [all|N] - show recent user/Codex messages from the bound session\n"
         "/resume <session_id> - bind this Telegram chat to an existing Codex session\n"
         "/menu - show the Telegram reply keyboard\n"
+        "/usage - show latest Codex rate-limit usage from local session logs\n"
         "/status - show whether Codex is running\n"
         "/cancel - terminate the current Codex subprocess\n\n"
         "Only allowlisted chat IDs can run /codex."
@@ -315,14 +320,128 @@ def help_text() -> str:
 def command_keyboard() -> dict:
     return {
         "keyboard": [
-            ["/sessions", "/history"],
-            ["/session", "/status"],
-            ["/cancel", "/help"],
+            ["/usage", "/sessions"],
+            ["/history", "/session"],
+            ["/status", "/cancel"],
+            ["/menu", "/help"],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
         "is_persistent": True,
     }
+
+
+def usage_text() -> str:
+    usage = load_latest_usage()
+    if usage is None:
+        return "No Codex usage/rate-limit data found in local session logs yet."
+
+    payload = usage["payload"]
+    rate_limits = payload.get("rate_limits") or {}
+    info = payload.get("info") or {}
+    total = info.get("total_token_usage") or {}
+    last = info.get("last_token_usage") or {}
+
+    lines = [
+        "Codex usage",
+        f"latest: {usage['timestamp']}",
+    ]
+
+    plan_type = rate_limits.get("plan_type")
+    if plan_type:
+        lines.append(f"plan: {plan_type}")
+
+    primary = rate_limits.get("primary")
+    secondary = rate_limits.get("secondary")
+    if primary:
+        lines.append(format_rate_limit("primary", primary))
+    if secondary:
+        lines.append(format_rate_limit("secondary", secondary))
+
+    rate_limit_reached = rate_limits.get("rate_limit_reached_type")
+    if rate_limit_reached:
+        lines.append(f"rate limit reached: {rate_limit_reached}")
+
+    if last:
+        lines.append(
+            "last turn tokens: "
+            f"{format_int(last.get('total_tokens'))} total "
+            f"(input {format_int(last.get('input_tokens'))}, "
+            f"output {format_int(last.get('output_tokens'))}, "
+            f"reasoning {format_int(last.get('reasoning_output_tokens'))})"
+        )
+    if total:
+        lines.append(
+            "session tokens: "
+            f"{format_int(total.get('total_tokens'))} total "
+            f"(input {format_int(total.get('input_tokens'))}, "
+            f"output {format_int(total.get('output_tokens'))}, "
+            f"reasoning {format_int(total.get('reasoning_output_tokens'))})"
+        )
+
+    lines.append("source: latest local Codex token_count event")
+    return "\n".join(lines)
+
+
+def load_latest_usage() -> dict | None:
+    latest: dict | None = None
+    for path in recent_session_files(40):
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except Exception:
+            continue
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            payload = record.get("payload") or {}
+            if record.get("type") != "event_msg" or payload.get("type") != "token_count":
+                continue
+            timestamp = record.get("timestamp") or ""
+            if latest is None or timestamp > latest["timestamp"]:
+                latest = {"timestamp": timestamp, "payload": payload}
+    return latest
+
+
+def recent_session_files(limit: int) -> list[Path]:
+    roots = [
+        Path.home() / ".codex" / "sessions",
+        Path.home() / ".codex" / "archived_sessions",
+    ]
+    paths: list[Path] = []
+    for root in roots:
+        if root.exists():
+            paths.extend(root.rglob("*.jsonl"))
+    paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return paths[:limit]
+
+
+def format_rate_limit(name: str, data: dict) -> str:
+    used = data.get("used_percent")
+    window = data.get("window_minutes")
+    resets_at = data.get("resets_at")
+    parts = [f"{name}: {used}% used"]
+    if window:
+        parts.append(f"{window}min window")
+    if resets_at:
+        parts.append(f"resets {format_unix_time(resets_at)}")
+    return ", ".join(parts)
+
+
+def format_unix_time(value: object) -> str:
+    try:
+        seconds = int(value)
+    except Exception:
+        return str(value)
+    return time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(seconds))
+
+
+def format_int(value: object) -> str:
+    try:
+        return f"{int(value):,}"
+    except Exception:
+        return "?"
 
 
 def status_text() -> str:

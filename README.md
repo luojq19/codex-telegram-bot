@@ -237,6 +237,12 @@ Open Telegram and send:
 
 This shows a reply keyboard with common no-argument commands.
 
+Show current Codex rate-limit usage from local session logs:
+
+```text
+/usage
+```
+
 Run a new task:
 
 ```text
@@ -354,6 +360,12 @@ Binds this Telegram chat to a known Codex session id.
 ```
 
 Reads the local Codex session JSONL file and returns recent user/Codex messages.
+
+```text
+/usage
+```
+
+Shows the latest Codex rate-limit usage available in local session logs. This reads the newest `token_count` event from `~/.codex/sessions/` or `~/.codex/archived_sessions/`, so it reflects the latest locally recorded Codex turn rather than querying OpenAI live.
 
 ```text
 /menu
